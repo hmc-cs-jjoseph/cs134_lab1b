@@ -1,0 +1,33 @@
+NAME: Jesse Joseph
+EMAIL: jjoseph@hmc.edu
+ID: 040161840
+
+
+Files included:
+lab1.h
+  - header file
+  - states all the includes needed for the lab1a program
+  - declares all the functions used in lab1.c 
+lab1.c
+  - implementation file for this submission.
+  - default make target compiles this and links the pthread library
+README
+  - This file - an overview of the submission
+Makefile
+  - Makefile has three targets: lab1 (default), clean, and dist.
+    - lab1, the default target, builds the executable (lab1a)
+    - clean removes generated files: the lab1a executable and the tarball.
+    - dist builds the tarball
+
+About this submission:
+This submission meets all the specifications listed in the assignment (to the best of my understanding).
+	- Regarding exit status:
+		- Although I believe I wrote the code to make EOF from shell or SIGPIPE exit 2, my program always seems to get a SIGCHLD first.
+		- Normal shell exit also sends a SIGCHLD, so my program pretty much always exits 0.
+		- I also tried killing the shell from a separate bash session, but tht's the same as sending a SIGINT through my program
+
+Sources, other than suggested man pages:
+  - https://jineshkj.wordpress.com/2006/12/22/how-to-capture-stdin-stdout-and-stderr-of-child-program/
+    - This helped me with the inter-process communication.
+  - http://man7.org/linux/man-pages/man3/pthread_join.3.html
+    - The man page for pthread_join
