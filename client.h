@@ -16,11 +16,9 @@
  * Send the EOF character with ctrl-D.
  *
  * Sending ctrl-c sends a SIGINT to the child shell, which forces
- * the child shell to exit. I don't believe this is what was 
- * intended by the assignment
+ * the child shell to exit.
  */
 
-#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -35,27 +33,12 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <strings.h>
+#include <netdb.h>
 
 int main(int argc, char **argv);
 
-void serve(int sockfd);
 
-void execShell();
-
-void communicateWithShell();
-
-void *forwardDataToShell();
-
-int sendBytesToShell(char *buff, int nBytes);
-
-int writeBytesToTerminal(char *buff, int nBytes);
-
-void *readBytesFromShell();
-
-void setTerminalToNonCanonicalInput();
-
-
-/* \brief Cleanup function to restore terminal settings
+/* \brief Cleanup function to restore terminal settings and collect shell exit status
  */
 void exitCleanUp();
 
@@ -63,9 +46,18 @@ void exitCleanUp();
  */
 void signalHandler(int SIGNUM);
 
-void collectShellStatus();
-
-/* \brief Changes terminal into non canonical input mode.
+/* \brief Changes terminal into byte-at-a-time non canonical input mode.
  */
 void setTerminalToNonCanonicalInput();
 
+void sendBytesToSocket();
+
+void recieveBytesFromSocketAndPrint();
+
+void logToFile(char *buff, int nBytes, int sendMode);
+
+int writeBytesToTerminal(char *buff, int nBytes);
+
+void *readBytesFromSocket();
+
+void *forwardDataToSocket();

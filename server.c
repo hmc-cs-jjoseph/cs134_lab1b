@@ -4,25 +4,15 @@
  * \ID 040161840
  */
 #include "server.h"
+#define TIMEOUT_ 20
+#define BUFFERSIZE_ 512
+
+int pipes[2][2];
 #define FDIN_ 0
 #define FDOUT_ 1
 #define FDERR_ 2
-#define TIMEOUT_ 20
-#define BUFFERSIZE_ 512
-/* Defining pipes:
- * We need two pipes - one for the parent to write to the
- * child, and one for the child to write to the parent.
- * The pipe that the parent will read from and the child
- * will write to is pipes[0], and the pipe that the parent
- * will write to and the child will read from will be
- * pipes[1].
- * source: https://jineshkj.wordpress.com/2006/12/22/how-to-capture-stdin-stdout-and-stderr-of-child-program/
- */
 #define PARENT_READ_PIPE_ 0
 #define PARENT_WRITE_PIPE_ 1
-
-int pipes[2][2];
-
 #define PARENT_READ_FD_ (pipes[PARENT_READ_PIPE_][FDIN_])
 #define PARENT_WRITE_FD_ (pipes[PARENT_WRITE_PIPE_][FDOUT_])
 #define CHILD_READ_FD_ (pipes[PARENT_WRITE_PIPE_][FDIN_])
@@ -30,13 +20,14 @@ int pipes[2][2];
 
 struct termios oldTerm;
 int terminalModeChanged = 0;
-int forked = 0;
 pid_t pid;
+int pidStatus;
+int newsockfd;
 
 int main(int argc, char **argv) {
-  int encrypt, rc, sockfd, newsockfd, port, clientLength;
+  int encrypt, sockfd, port;
+	socklen_t clientLength;
 	struct sockaddr_in serverAddress, clientAddress;
-  char sockBuffer[512];
 
   /* First, we register a cleanup function to make sure
    * that the terminal is returned to canonical input 
@@ -54,15 +45,17 @@ int main(int argc, char **argv) {
   int optind;
   struct option longOptions[] = {
     {"port", required_argument, 0, 'p'},
-		{"encrypt", no_argument, &encrypt, 'e'},
+		{"encrypt", optional_argument, &encrypt, 'e'},
     {0, 0, 0, 0}};
-	while((opt = getopt_long(argc, argv, "p", longOptions, &optind)) != -1) {
+	while((opt = getopt_long(argc, argv, "p:e", longOptions, &optind)) != -1) {
 		switch(opt) {
 			case 'p':
-				port = optarg;
+				port = atoi(optarg);
+				break;
+			case 'e':
+				encrypt = 1;
 				break;
 			case '?':
-        // getopt_long handles the error, no need to write perror
 				exit(1);
 			case 0:
 				break;
@@ -83,12 +76,11 @@ int main(int argc, char **argv) {
 		exit(1);
 	}
 
-	clientLength = sizeof(clientAddress);
-	bzero((char *) &serverAddress, sizeof(serverAddress));
+	bzero((void *) &serverAddress, sizeof(serverAddress));
 	serverAddress.sin_family = AF_INET;
 	serverAddress.sin_addr.s_addr = INADDR_ANY;
 	serverAddress.sin_port = htons(port);
-  if(bind(sockfd, &serverAddress, sizeof(serverAddress)) < 0) {
+  if(bind(sockfd, (struct sockaddr *) &serverAddress, sizeof(serverAddress)) < 0) {
 		perror("In call to bind(sockfd, &serverAddress, sizeof(serverAddress)):\nFailed to bind to address.\n");
 		exit(1);
 	}
@@ -96,6 +88,7 @@ int main(int argc, char **argv) {
 		perror("In call to listen(sockfd, 3):\nFailed to prepare socket to accept connections.\n");
 		exit(1);
 	}
+	clientLength = (socklen_t ) sizeof(clientAddress);
 
 	/* Blocks until a connection is made */
 	newsockfd = accept(sockfd, (struct sockaddr *) &clientAddress, &clientLength);
@@ -106,7 +99,8 @@ int main(int argc, char **argv) {
 	if(close(sockfd) < 0) {
 		perror("In call to close(sockfd):\nFailed to close connection to socket.\n");
 		exit(1);
-	rc = serve(newsockfd);
+	}
+	serve(newsockfd);
 	if(close(newsockfd) < 0) {
 		perror("In call to close(nesockfd):\nFailed to close connection to socket.\n");
 		exit(1);
@@ -114,21 +108,22 @@ int main(int argc, char **argv) {
 	return 0;
 }
 
-int serve(int sockfd) {
+void serve(int sockfd) {
 /* Build our two pipes */
 	pipe(pipes[PARENT_READ_PIPE_]);
 	pipe(pipes[PARENT_WRITE_PIPE_]);
 	
 	pid = fork();
-	forked = 1;
 	if(pid < 0) {
 		perror("In call to fork():\nFailed to fork process.\n");
 		exit(1);
 	}
 	else if (pid == 0) {
+		/* child */
 		execShell();
 	}
 	else {
+		/* parent */
 		/* Set stdin and stdout to be the socket */
 		if(dup2(sockfd, FDIN_) < 0) {
 			perror("In call to dup2(sockfd, FDIN_):\nIn server process: Failed to redirect stdin to the socket.\n");
@@ -138,14 +133,16 @@ int serve(int sockfd) {
 			perror("In call to dup2(sockfd, FDOUT_):\nIn server process: Failed to redirect stdout to the socket.\n");
 			exit(1);
 		}
+		if(dup2(sockfd, FDERR_) < 0) {
+			perror("In call to dup2(sockfd, FDOUT_):\nIn server process: Failed to redirect stdout to the socket.\n");
+			exit(1);
+		}
 		communicateWithShell();
 	}
-	return 0;
 }
 
 void execShell() {
-  /* Child process 
-   */
+  /* Child process */
   /* Connect the two pipes to the child's input and output. */
   if(dup2(CHILD_READ_FD_, FDIN_) < 0) {
     perror("In call to dup2(CHILD_READ_FD_, FDIN_):\nFailed to connect pipe to child's input.\n");
@@ -155,7 +152,10 @@ void execShell() {
     perror("In call to dup2(CHILD_WRITE_FD_, FDOUT_):\nFailed to connect pipe to child's output.\n");
     exit(1);
   }
-  
+	if(dup2(CHILD_WRITE_FD_, FDERR_) < 0) {
+    perror("In call to dup2(CHILD_WRITE_FD_, FDERR_):\nFailed to connect pipe to child's output.\n");
+    exit(1);
+  }
   /* Close file descriptors unneeded by child process */
   if(close(CHILD_READ_FD_) < 0) {
     perror("In call to close(CHILD_READ_FD_):\nFailed to close child's old input port.\n");
@@ -183,6 +183,7 @@ void execShell() {
 void communicateWithShell() {
   /* Parent process */
   signal(SIGCHLD, signalHandler);
+	signal(SIGPIPE, signalHandler);
   signal(SIGINT, SIG_IGN);
   if(close(CHILD_READ_FD_) < 0) {
     perror("In call to close(CHILD_READ_FD_):\nFailed to close child pipe input port.\n");
@@ -193,15 +194,13 @@ void communicateWithShell() {
     exit(1);
   }
 
-  setTerminalToNonCanonicalInput();
-
   pthread_t readThread;
   pthread_t writeThread;
-  if(pthread_create(&writeThread, NULL, forwardDataToShell, &PARENT_WRITE_FD_) < 0) {
+  if(pthread_create(&writeThread, NULL, forwardDataToShell, NULL) < 0) {
     perror("In call to pthread_create(%writeThread, NULL, forwardDataToShell, &PARENT_WRITE_FD_):\nFailed to create thread.\n");
     exit(1);
   }
-  if(pthread_create(&readThread, NULL, readBytesFromShell, &PARENT_READ_FD_) < 0) {
+  if(pthread_create(&readThread, NULL, readBytesFromShell, NULL) < 0) {
     perror("In call to pthread_create(&readThread, NULL, readBytesFromShell, &PARENT_READ_FD):\nFailed to create thread.\n");
     exit(1);
   }
@@ -209,7 +208,7 @@ void communicateWithShell() {
     perror("In call to pthread_join(writeThread, NULL):\nThread did not terminate successfully.\n");
     exit(1);
   }
-  if(pthread_cancel(readThread) != 0) {
+  if(pthread_join(readThread, NULL) != 0) {
     perror("In call to pthread_cancel(readThread):\nThread was not cancelled successfully.\n");
     exit(1);
   }
@@ -223,44 +222,50 @@ void communicateWithShell() {
 	}
 }
 
-void *forwardDataToShell(void *fd) {
+void *forwardDataToShell() {
   /* Non-Canonical input:
    * read bytes continuously as they become available
    * and write them back continuously
    */
   int bytesRead = 0;
   char buff[BUFFERSIZE_];
-  int *fd_int_ptr = (int *)fd;
   int rc = 0;
   while(!rc) {
     bytesRead = read(FDIN_, buff, BUFFERSIZE_);
     if(bytesRead < 0) {
-      perror("In call to read(FDIN_, buff, BUFFERSIZE_):\nInput read failed.\n");
-      exit(1);
+			if(kill(pid, SIGTERM) < 0) {
+				perror("In call to kill(pid, SIGTERM):\nFailed to send SIGTERM to shell.\n");
+				exit(1);
+			}
+			if(close(PARENT_WRITE_FD_) < 0) {
+				perror("In call to close(fd):\r\nFailed to close pipe after normal shell termination.\r\n");
+				exit(1);
+			}
+      exit(2);
     }
     else {
-      rc = writeBytesToTerminal(buff, bytesRead) || sendBytesToShell(buff, bytesRead, *fd_int_ptr);
+      rc = sendBytesToShell(buff, bytesRead);
     }
   }
+	if(close(PARENT_WRITE_FD_) < 0) {
+		perror("In call to close(fd):\r\nFailed to close pipe after normal shell termination.\r\n");
+		exit(1);
+	}
   return NULL;
 }
 
-int sendBytesToShell(char *buff, int nBytes, int fd) {
+int sendBytesToShell(char *buff, int nBytes) {
   char writeByte;
   char lf = '\n';
   for(int i = 0; i < nBytes; ++i) {
     writeByte = buff[i];
     if(writeByte == '\n' || writeByte == '\r') {
-      if(write(fd, &lf, 1) < 0) {
+      if(write(PARENT_WRITE_FD_, &lf, 1) < 0) {
 				perror("In call to write(fd, &lf, 1):\nWrite to shell failed.\n");
 				exit(1);
       }
     }
     else if(writeByte == 0x004) {
-      if(write(fd, &writeByte, 1) < 0) {
-				perror("In call to write(fd, &writeByte, 1):\nFailed to send EOF to shell.\n");
-				exit(1);
-      }
       return 1;
     }
     else if(writeByte == 0x003) {
@@ -270,7 +275,7 @@ int sendBytesToShell(char *buff, int nBytes, int fd) {
       }
     }
     else {
-      if(write(fd, &writeByte, 1) < 0) {
+      if(write(PARENT_WRITE_FD_, &writeByte, 1) < 0) {
 				fprintf(stderr, "In call to write(fd, &writeByte, 1):\nFailed to write char %s to shell.\n", &writeByte);
 				perror("");
 				exit(1);
@@ -285,13 +290,15 @@ int writeBytesToTerminal(char *buff, int nBytes) {
   char crlf[2] = {'\r', '\n'};
   for(int i = 0; i < nBytes; ++i ) {
     writeByte = buff[i];
+		/*
     if(writeByte == '\n' || writeByte == '\r') {
       if(write(FDOUT_, crlf,  2) < 0) {
 				perror("In call to write(FDOUT_, crlf, 2):\nFailed to write to terminal.\n");
 				exit(1);
       }
     } 
-    else if(writeByte == 0x004){
+		*/
+    if(writeByte == 0x004){
       return 1;
     }
     else {
@@ -304,72 +311,58 @@ int writeBytesToTerminal(char *buff, int nBytes) {
   return 0;
 }
 
-void *readBytesFromShell(void *fd) {
+void *readBytesFromShell() {
   int bytesRead = 0;
   char buff[BUFFERSIZE_];
-  int *fd_int_ptr = (int *)fd;
   int rc = 0;
   while(!rc) {
-    bytesRead = read(*fd_int_ptr, buff, BUFFERSIZE_);
+    bytesRead = read(PARENT_READ_FD_, buff, BUFFERSIZE_);
     if(bytesRead < 0) {
-      perror("In call to read(*fd_int_ptr, buff, BUFFERSIZE_):\nRead from shell failed.\n");
+      perror("In call to read(PARENT_READ_FD_, buff, BUFFERSIZE_):\nRead from shell failed.\n");
       exit(2);
     }
     else {
       rc = writeBytesToTerminal(buff, bytesRead);
     }
   }
+	if(close(PARENT_READ_FD_) < 0) {
+		perror("In call to close(PARENT_READ_FD_):\r\nFailed to close pipe after normal shell termination.\r\n");
+		exit(1);
+	}
   return NULL;
 }
-void setTerminalToNonCanonicalInput() {
-  int rc = 0; 
-  /* Create a new termios object to define our desired 
-   * terminal settings.
-   */
-  struct termios newTerm;
-  newTerm.c_iflag = IUTF8 | ISTRIP;
-  newTerm.c_oflag = 0;
-  newTerm.c_lflag = 0;
-  rc = tcflush(FDIN_, TCIFLUSH);
-  if(rc != 0) {
-    perror("In call to tcflush(FDIN_, TCIFLUSH):\nFailed to flush terminal input.\n");
+
+
+void signalHandler(int SIGNUM) {
+  if(SIGNUM == SIGPIPE) {
+		collectShellStatus();
+    exit(2);
+  }
+	else if(SIGNUM == SIGCHLD) {
+		collectShellStatus();
+		exit(0);
+  }
+  else {
+    fprintf(stdout, "received signal: %d\r\n", SIGNUM);
     exit(1);
   }
-  rc = tcsetattr(FDIN_, TCSANOW, &newTerm);
-  if(rc != 0) {
-    perror("In call to tcsetattr(FDIN_, TCSANOW, &newTerm):\nFailed to set terminal to non-canonical input.\n");
-    exit(1);
-  }
-  terminalModeChanged = 1;
+}
+
+void collectShellStatus() {
+	if(wait(&pidStatus) < 0) {
+		perror("in call to wait(&pidStatus):\r\nwaitpid failed.\r\n");
+		exit(1);
+	}
+	int pidStopSignal = pidStatus & 0x00FF;
+	int pidExitStatus = pidStatus >> 8;
+	fprintf(stdout, "\r\nSHELL EXIT SIGNAL=%d STATUS=%d\r\n", pidStopSignal, pidExitStatus);
 }
 
 void exitCleanUp() {
   if(terminalModeChanged) {
-    int rc = tcsetattr(FDIN_, TCSANOW, &oldTerm);
-    if(rc != 0) {
-      perror("In call to tcsetattr(FDIN_, TCSANOW, &oldTerm):\nFailed to restore terminal to canonical input.\n");
+    if(tcsetattr(FDIN_, TCSANOW, &oldTerm) != 0) {
+      perror("In call to tcsetattr(FDIN_, TCSANOW, &oldTerm):\r\nFailed to restore terminal to canonical input.\r\n");
     }
   }
-  if(forked) {
-    int pidStatus;
-    if(waitpid(pid, &pidStatus, WNOHANG) < 0) {
-      perror("In call to waitpid(pid, &status, 0):\nwaitpid failed due to signal in calling process.\n");
-    }
-    int pidExitStatus = WEXITSTATUS(pidStatus);
-    int pidStopSignal = WSTOPSIG(pidStatus);
-    fprintf(stdout, "\nSHELL EXIT SIGNAL=%d STATUS=%d\n", pidExitStatus, pidStopSignal);
-  }
-}
-
-void signalHandler(int SIGNUM) {
-  if(SIGNUM == SIGPIPE) {
-    exit(2);
-  }
-  if(SIGNUM == SIGCHLD) {
-    exit(2);
-  }
-  else {
-    fprintf(stdout, "received signal: %d\n", SIGNUM);
-    exit(1);
-  }
+	close(newsockfd);
 }
