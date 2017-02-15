@@ -25,18 +25,9 @@ int pidStatus;
 int newsockfd;
 
 int main(int argc, char **argv) {
-  int encrypt, sockfd, port;
+  int encrypt, port, sockfd;
 	socklen_t clientLength;
 	struct sockaddr_in serverAddress, clientAddress;
-
-  /* First, we register a cleanup function to make sure
-   * that the terminal is returned to canonical input 
-   * mode on program exit.
-   */
-  if(atexit(exitCleanUp) != 0) {
-    perror("In call to atexit(exitCleanUp): Failed to register cleanup routine");
-    exit(1);
-  }
 
   /* Parse arguments with getopt_long(4).
    * Valid arguments: --encrypt, --port=
@@ -285,61 +276,41 @@ int sendBytesToShell(char *buff, int nBytes) {
   return 0;
 }
 
-int writeBytesToTerminal(char *buff, int nBytes) {
-  char writeByte;
-  char crlf[2] = {'\r', '\n'};
-  for(int i = 0; i < nBytes; ++i ) {
-    writeByte = buff[i];
-		/*
-    if(writeByte == '\n' || writeByte == '\r') {
-      if(write(FDOUT_, crlf,  2) < 0) {
-				perror("In call to write(FDOUT_, crlf, 2):\nFailed to write to terminal.\n");
-				exit(1);
-      }
-    } 
-		*/
-    if(writeByte == 0x004){
-      return 1;
-    }
-    else {
-      if(write(FDOUT_, &writeByte, 1) < 0) {
-				perror("In call to write(FDOUT_, &writeByte, 1):\nFailed to write to terminal.\n");
-				exit(1);
-      }
-    }
-  }
-  return 0;
-}
-
 void *readBytesFromShell() {
   int bytesRead = 0;
   char buff[BUFFERSIZE_];
-  int rc = 0;
-  while(!rc) {
+  while(1) {
     bytesRead = read(PARENT_READ_FD_, buff, BUFFERSIZE_);
     if(bytesRead < 0) {
       perror("In call to read(PARENT_READ_FD_, buff, BUFFERSIZE_):\nRead from shell failed.\n");
       exit(2);
     }
+		else if(bytesRead == 0) {
+			if(close(PARENT_READ_FD_) < 0) {
+				perror("In call to close(PARENT_READ_FD_):\r\nFailed to close pipe after normal shell termination.\r\n");
+				exit(1);
+			}
+			return NULL;
+		}
     else {
-      rc = writeBytesToTerminal(buff, bytesRead);
+			if(write(FDOUT_, buff, bytesRead) < 0) {
+				perror("In call to write(FDOUT_, buff, bytesRead):\nFailed to write to stdout.\n");
+				exit(1);
+			}
     }
   }
-	if(close(PARENT_READ_FD_) < 0) {
-		perror("In call to close(PARENT_READ_FD_):\r\nFailed to close pipe after normal shell termination.\r\n");
-		exit(1);
-	}
   return NULL;
 }
-
 
 void signalHandler(int SIGNUM) {
   if(SIGNUM == SIGPIPE) {
 		collectShellStatus();
+		close(newsockfd);
     exit(2);
   }
 	else if(SIGNUM == SIGCHLD) {
 		collectShellStatus();
+		close(newsockfd);
 		exit(0);
   }
   else {
@@ -355,14 +326,6 @@ void collectShellStatus() {
 	}
 	int pidStopSignal = pidStatus & 0x00FF;
 	int pidExitStatus = pidStatus >> 8;
-	fprintf(stdout, "\r\nSHELL EXIT SIGNAL=%d STATUS=%d\r\n", pidStopSignal, pidExitStatus);
+	fprintf(stdout, "EXIT SIGNAL=%d STATUS=%d\n", pidStopSignal, pidExitStatus);
 }
 
-void exitCleanUp() {
-  if(terminalModeChanged) {
-    if(tcsetattr(FDIN_, TCSANOW, &oldTerm) != 0) {
-      perror("In call to tcsetattr(FDIN_, TCSANOW, &oldTerm):\r\nFailed to restore terminal to canonical input.\r\n");
-    }
-  }
-	close(newsockfd);
-}

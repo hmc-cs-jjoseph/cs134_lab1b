@@ -56,7 +56,7 @@ void recieveBytesFromSocketAndPrint();
 
 void logToFile(char *buff, int nBytes, int sendMode);
 
-int writeBytesToTerminal(char *buff, int nBytes);
+int writeBytesToTerminal(char *buff, int nBytes, int fromSocket);
 
 void *readBytesFromSocket();
 

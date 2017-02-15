@@ -117,10 +117,7 @@ void sendBytesToSocket() {
 		if(shouldLog) {
 			logToFile(buff, nBytes, 1);
 		}
-		if(write(FDOUT_, buff, nBytes) < 0) {
-			perror("In call to write(FDOUT_, buff, nBytes):\r\nFailed to echo to terminal.\r\n");
-			exit(1);
-		}
+		writeBytesToTerminal(buff, nBytes, 0);
 		int sent;
 		int bytesToWrite = nBytes;
 		while(bytesToWrite > 0) {
@@ -137,8 +134,6 @@ void sendBytesToSocket() {
 		}
 	}
 	else if(nBytes == 0) {
-		//fprintf(stdout, "In call to read(FDIN_, buff, BUFFERSIZE_):\r\nRecieved EOF from terminal.\r\n");
-		//exit(0);
 	}
 	else {
 		if(errno != EAGAIN) {
@@ -158,40 +153,51 @@ void recieveBytesFromSocketAndPrint() {
 		}
 	}
 	else if(recieved == 0) {
-		//fprintf(stdout, "Server closed.\r\n");
+		exit(0);
 	}
 	else {
 		if(shouldLog) {
 			logToFile(buff, recieved, 0);
 		}
-		fprintf(stdout, ">> "); 
-		writeBytesToTerminal(buff, recieved);
+		writeBytesToTerminal(buff, recieved, 1);
 	}
 }
 
 void logToFile(char *buff, int nBytes, int sentflag) {
-	char *mode;
-	int modeBytes;
+	char mode[128];
+	bzero(mode, 128);
 	if(sentflag) {
-		mode = "Sent:\r\n";
-		modeBytes = 7;
+		sprintf(mode, "SENT %d BYTES: ", nBytes);
 	}
 	else {
-		mode = "Recieved:\r\n";
-		modeBytes = 11;
+		sprintf(mode, "RECEIVED %d BYTES: ", nBytes);
 	}
-	if(write(logfd, mode, modeBytes) < 0) {
-		perror("in call to write(logfd, buff, nBytes):\r\nFailed to write to logfile.\r\n");
-		exit(1);
+	int i;
+	for(i = 0; i < 128; ++i) {
+		char writeByte = mode[i];
+		if(writeByte == 0) {
+			break;
+		}
+		else {
+			if(write(logfd, &mode[i], 1) < 0) {
+				perror("in call to write(logfd, buff, nBytes):\r\nFailed to write to logfile.\r\n");
+				exit(1);
+			}
+		}
 	}
 	if(write(logfd, buff, nBytes) < 0) {
 		perror("in call to write(logfd, buff, nBytes):\r\nFailed to write to logfile.\r\n");
 		exit(1);
 	}
+	if(write(logfd, "\n", 1) < 0) {
+		perror("in call to write(logfd, \"\\n\", 1):\r\nFailed to write to logfile.\r\n");
+		exit(1);
+	}
+
 }
 
 
-int writeBytesToTerminal(char *buff, int nBytes) {
+int writeBytesToTerminal(char *buff, int nBytes, int fromSocket) {
   char writeByte;
   char crlf[2] = {'\r', '\n'};
   for(int i = 0; i < nBytes; ++i ) {
@@ -202,7 +208,7 @@ int writeBytesToTerminal(char *buff, int nBytes) {
 				exit(1);
       }
     } 
-    else if(writeByte == 0x004){
+    else if(writeByte == 0x004 && fromSocket) {
       exit(0);
     }
     else {
