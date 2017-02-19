@@ -18,25 +18,23 @@ int pipes[2][2];
 #define CHILD_READ_FD_ (pipes[PARENT_WRITE_PIPE_][FDIN_])
 #define CHILD_WRITE_FD_ (pipes[PARENT_READ_PIPE_][FDOUT_])
 
-struct termios oldTerm;
-int terminalModeChanged = 0;
 pid_t pid;
-int pidStatus;
-int newsockfd;
+int pidStatus, sockfd, encryptFlag;
+MCRYPT encrypt, decrypt;
 
 int main(int argc, char **argv) {
-  int encrypt, port, sockfd;
-	socklen_t clientLength;
-	struct sockaddr_in serverAddress, clientAddress;
+	char *keyFile;
+	char key[16];
+  int port;
 
   /* Parse arguments with getopt_long(4).
-   * Valid arguments: --encrypt, --port=
+   * Valid arguments: --encrypt=, --port=
    */
   char opt;
   int optind;
   struct option longOptions[] = {
     {"port", required_argument, 0, 'p'},
-		{"encrypt", optional_argument, &encrypt, 'e'},
+		{"encrypt", required_argument, 0, 'e'},
     {0, 0, 0, 0}};
 	while((opt = getopt_long(argc, argv, "p:e", longOptions, &optind)) != -1) {
 		switch(opt) {
@@ -44,7 +42,8 @@ int main(int argc, char **argv) {
 				port = atoi(optarg);
 				break;
 			case 'e':
-				encrypt = 1;
+				keyFile = optarg;
+				encryptFlag = 1;
 				break;
 			case '?':
 				exit(1);
@@ -54,16 +53,93 @@ int main(int argc, char **argv) {
 				break;
     }
   }
+	if(port == 0) {
+		fprintf(stderr, "Usage: ./server --port=<portno> [ --encrypt=<keyfile> ]\n");
+		exit(1);
+	}
+	sockfd = connectSocket(port);
 
-  /* Save the old terminal settings */
-  if(tcgetattr(FDIN_, &oldTerm) != 0) {
-    perror("In call to tcgetattr(FDIN_, &oldTerm):\nFailed to save original terminal settings.\n");
-    exit(1);
-  }
+	if(encryptFlag) {
+		int keyfd = open(keyFile, O_RDONLY);
+		if(keyfd < 0) {
+			perror("In call to open(keyFile, O_RDONLY):\nFailed to open key file.\n");
+			exit(1);
+		}
+		if(read(keyfd, key, 16) < 16) {
+			perror("In call to read(keyfd, key, 16):\nFailed to get encryption key.\n");
+			exit(1);
+		}
+		if(close(keyfd) < 0) {
+			perror("In call to close(keyfd):\nFailed to close keyfile.\n");
+			exit(1);
+		}
+		initializeEncryption(sockfd, &encrypt, &decrypt, key);
+	}
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if(sockfd < 0) {
+	serve(sockfd);
+	if(close(sockfd) < 0) {
+		perror("In call to close(nesockfd):\nFailed to close connection to socket.\n");
+		exit(1);
+	}
+	return 0;
+}
+
+void initializeEncryption(int fd, MCRYPT *encrypt_td, MCRYPT *decrypt_td, char *encryptKey) {
+	/* Open two separate mcrypt modules, one for encrypting and one for decrypting */
+	*encrypt_td = mcrypt_module_open("xtea", NULL, "cfb", NULL);
+	if (*encrypt_td == MCRYPT_FAILED) {
+		perror("In server: Failed to open mcrypt encryption module for encryption.\n");
+		exit(1);
+	}
+	*decrypt_td = mcrypt_module_open("xtea", NULL, "cfb", NULL);
+	if (*decrypt_td == MCRYPT_FAILED) {
+		perror("In server: Failed to open mcrypt encryption module for decryption.\n");
+		exit(1);
+	}
+	/* We have two initialization vectors: one for outgoing data and one for incoming
+	 * data. The incoming data initialization vector is created by the client and
+	 * is the first data sent over the socket. The outgoing IV is set by the server
+	 * and sent to the client.
+	 */
+	int IVsize = mcrypt_enc_get_iv_size(*encrypt_td); 
+	char IV[IVsize];
+	char clientIV[IVsize];
+	srand(time(0));
+	for(int i = 0; i < IVsize; ++i) {
+		IV[i] = rand() % 10;
+	}
+	if(mcrypt_generic_init(*encrypt_td, encryptKey, 16, IV) < 0) {
+		perror("In call to mcrypt_generic_init(encrypt, encryptKey, 16, IV):\nFailed to initialize encryption.\n");
+		exit(1);
+	}
+	if(recv(fd, clientIV, IVsize, 0) < IVsize) {
+		perror("In call to recv(fd, serverIV, IVsize, 0):\nDidn't receive full initialization vector from server.\n");
+		exit(1);
+	}
+	if(send(fd, IV, IVsize, 0) < IVsize) {
+		perror("In call to send(fd, IV, IVsize, 0):\nFailed to send initialization vector to server.\n");
+		exit(1);
+	}	
+	if(mcrypt_generic_init(*decrypt_td, encryptKey, 16, clientIV) < 0) {
+		perror("In call to mcrypt_generic_init(encrypt, encryptKey, 16, serverIV):\nFailed to initialize encryption.\n");
+		exit(1);
+	}
+}
+
+int connectSocket(int port) {
+	socklen_t clientLength;
+	struct sockaddr_in serverAddress, clientAddress;
+	int unboundSock = socket(AF_INET, SOCK_STREAM, 0);
+	if(unboundSock < 0) {
 		perror("In call to socket(AF_INET, SOCK_STREAM, 0):\nFailed to open socket.\n");
+		exit(1);
+	}
+	/* Set SO_REUSEADDR because this server closes after one use, so this will allow
+	 * immediate reboot of server.
+	 */
+	int trueVal = 1;
+	if(setsockopt(unboundSock, SOL_SOCKET, SO_REUSEADDR, &trueVal, sizeof(int)) < 0) {
+		perror("In call to setsockopt(unboundSock, SOL_SOCKET, SO_REUSEADDR, &1, sizeof(int)):\nFailed to set socket option.\n");
 		exit(1);
 	}
 
@@ -71,35 +147,30 @@ int main(int argc, char **argv) {
 	serverAddress.sin_family = AF_INET;
 	serverAddress.sin_addr.s_addr = INADDR_ANY;
 	serverAddress.sin_port = htons(port);
-  if(bind(sockfd, (struct sockaddr *) &serverAddress, sizeof(serverAddress)) < 0) {
-		perror("In call to bind(sockfd, &serverAddress, sizeof(serverAddress)):\nFailed to bind to address.\n");
+  if(bind(unboundSock, (struct sockaddr *) &serverAddress, sizeof(serverAddress)) < 0) {
+		perror("In call to bind(unboundSock, &serverAddress, sizeof(serverAddress)):\nFailed to bind to address.\n");
 		exit(1);
 	}
-	if(listen(sockfd, 3) < 0){
-		perror("In call to listen(sockfd, 3):\nFailed to prepare socket to accept connections.\n");
+	if(listen(unboundSock, 3) < 0){
+		perror("In call to listen(unboundSock, 3):\nFailed to prepare socket to accept connections.\n");
 		exit(1);
 	}
 	clientLength = (socklen_t ) sizeof(clientAddress);
 
 	/* Blocks until a connection is made */
-	newsockfd = accept(sockfd, (struct sockaddr *) &clientAddress, &clientLength);
-	if(newsockfd < 0) {
-		perror("In call to accept(sockfd, (struct sockaddr *) &clientAddress, $clientLength):\nFailed to open socket.\n");
+	sockfd = accept(unboundSock, (struct sockaddr *) &clientAddress, &clientLength);
+	if(sockfd < 0) {
+		perror("In call to accept(unboundSock, (struct sockaddr *) &clientAddress, $clientLength):\nFailed to open socket.\n");
 		exit(1);
 	}
-	if(close(sockfd) < 0) {
-		perror("In call to close(sockfd):\nFailed to close connection to socket.\n");
+	if(close(unboundSock) < 0) {
+		perror("In call to close(unboundSock):\nFailed to close connection to socket.\n");
 		exit(1);
 	}
-	serve(newsockfd);
-	if(close(newsockfd) < 0) {
-		perror("In call to close(nesockfd):\nFailed to close connection to socket.\n");
-		exit(1);
-	}
-	return 0;
+	return sockfd;
 }
 
-void serve(int sockfd) {
+void serve(int fd) {
 /* Build our two pipes */
 	pipe(pipes[PARENT_READ_PIPE_]);
 	pipe(pipes[PARENT_WRITE_PIPE_]);
@@ -116,15 +187,15 @@ void serve(int sockfd) {
 	else {
 		/* parent */
 		/* Set stdin and stdout to be the socket */
-		if(dup2(sockfd, FDIN_) < 0) {
+		if(dup2(fd, FDIN_) < 0) {
 			perror("In call to dup2(sockfd, FDIN_):\nIn server process: Failed to redirect stdin to the socket.\n");
 			exit(1);
 		}
-		if(dup2(sockfd, FDOUT_) < 0) {
+		if(dup2(fd, FDOUT_) < 0) {
 			perror("In call to dup2(sockfd, FDOUT_):\nIn server process: Failed to redirect stdout to the socket.\n");
 			exit(1);
 		}
-		if(dup2(sockfd, FDERR_) < 0) {
+		if(dup2(fd, FDERR_) < 0) {
 			perror("In call to dup2(sockfd, FDOUT_):\nIn server process: Failed to redirect stdout to the socket.\n");
 			exit(1);
 		}
@@ -214,9 +285,7 @@ void communicateWithShell() {
 }
 
 void *forwardDataToShell() {
-  /* Non-Canonical input:
-   * read bytes continuously as they become available
-   * and write them back continuously
+  /* Non-Canonical input
    */
   int bytesRead = 0;
   char buff[BUFFERSIZE_];
@@ -235,6 +304,12 @@ void *forwardDataToShell() {
       exit(2);
     }
     else {
+			if(encryptFlag) {
+				if(mdecrypt_generic(decrypt, buff, bytesRead) < 0) {
+					perror("In call to mdecrypt_generic(decrypt, buff, bytesRead):\nDecrypt failed.\n");
+					exit(1);
+				}
+			}
       rc = sendBytesToShell(buff, bytesRead);
     }
   }
@@ -293,6 +368,12 @@ void *readBytesFromShell() {
 			return NULL;
 		}
     else {
+			if(encryptFlag) {
+				if(mcrypt_generic(encrypt, buff, bytesRead) < 0) {
+					perror("In call to mcrypt_generic(encrypt, buff, bytesRead):\nEncrypt failed.\n");
+					exit(1);
+				}
+			}
 			if(write(FDOUT_, buff, bytesRead) < 0) {
 				perror("In call to write(FDOUT_, buff, bytesRead):\nFailed to write to stdout.\n");
 				exit(1);
@@ -305,12 +386,14 @@ void *readBytesFromShell() {
 void signalHandler(int SIGNUM) {
   if(SIGNUM == SIGPIPE) {
 		collectShellStatus();
-		close(newsockfd);
+		close(sockfd);
+		close_mcrypt();
     exit(2);
   }
 	else if(SIGNUM == SIGCHLD) {
 		collectShellStatus();
-		close(newsockfd);
+		close(sockfd);
+		close_mcrypt();
 		exit(0);
   }
   else {
@@ -326,6 +409,30 @@ void collectShellStatus() {
 	}
 	int pidStopSignal = pidStatus & 0x00FF;
 	int pidExitStatus = pidStatus >> 8;
-	fprintf(stdout, "EXIT SIGNAL=%d STATUS=%d\n", pidStopSignal, pidExitStatus);
+	char statusMessage[128];
+	bzero(statusMessage, 128);
+	sprintf(statusMessage, "EXIT SIGNAL=%d STATUS=%d\n", pidStopSignal, pidExitStatus);
+	int statusLength;
+	for( statusLength = 0; statusLength < 128; ++statusLength) {
+		if(statusMessage[statusLength] == '\0') {
+			break;
+		}
+	}
+	if(encryptFlag) {
+		if(mcrypt_generic(encrypt, statusMessage, statusLength) < 0) {
+			perror("In call to mcrypt_generic(encrypt, statusMessage, statusLength):\nFailed to encrypt status line.\n");
+			exit(1);
+		}
+	}
+	if(write(FDOUT_, statusMessage, statusLength) < 0) {
+		perror("In call to write(FDOUT_, statusMessage, statusLength):\nFailed to send status line.\n");
+		exit(1);
+	}
 }
 
+void close_mcrypt() {
+	mcrypt_generic_deinit(encrypt);
+	mcrypt_generic_deinit(decrypt);
+	mcrypt_module_close(encrypt);
+	mcrypt_module_close(decrypt);
+}
